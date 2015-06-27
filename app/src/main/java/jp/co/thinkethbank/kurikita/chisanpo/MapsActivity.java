@@ -18,6 +18,9 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.Toast;
 
+import com.dropbox.client2.DropboxAPI;
+import com.dropbox.client2.android.AndroidAuthSession;
+import com.dropbox.client2.session.AppKeyPair;
 import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.api.GoogleApiClient;
 import com.google.android.gms.location.LocationListener;
@@ -58,7 +61,15 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     private static final int MENU_SET_GOAL = 2;
     private static final int MENU_TAKE_PHOTO = 3;
 
+    private static final String SERVER_DATA_TYPE_INFORMATION = "information";
+    private static final String SERVER_DATA_TYPE_POINT = "point";
+    private static final String SERVER_DATA_TYPE_COMMENT = "comment";
+    private static final String SERVER_DATA_TYPE_REFERENCE = "reference";
+
     private static final double VALUE_GOAL_RANGE = 900;
+
+    /** ドロップボックスのAPI */
+    private DropboxAPI<AndroidAuthSession> mApi;
 
     private GoogleMap mMap; // Might be null if Google Play services APK is not available.
     private GoogleApiClient googleApiClient = null;
@@ -98,6 +109,8 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     protected void onResume() {
         super.onResume();
         googleApiClient.connect();
+        // TODO 面倒臭いから後で
+        AndroidAuthSession session = mApi.getSession();
     }
 
     @Override
@@ -162,6 +175,11 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
             GroundOverlay overlay = mMap.addGroundOverlay(options);
             // 透過率の設定
             overlay.setTransparency(0.3F);
+
+            // ************ ここから写真アップロード ************
+            /*
+            UploadPicture uploadPicture = new UploadPicture(this. mApi, )
+            */
         }
     }
 
@@ -214,6 +232,12 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         settings.setZoomGesturesEnabled(true);
     }
 
+    private void setupDropBox(){
+        AndroidAuthSession session = new AndroidAuthSession(new AppKeyPair("flu2b0urtc18egm", "kroennf800x63fa"));
+        mApi = new DropboxAPI<AndroidAuthSession>(session);
+        mApi.getSession().startOAuth2Authentication(this);
+    }
+
     private void makeSetGoalDialog(){
         final EditText editText1 = new EditText(this);
         editText1.setInputType(InputType.TYPE_CLASS_NUMBER);
@@ -248,18 +272,15 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         dialog.show();
     }
 
-    private void updateMap(){
+    private void refreshMap(){
         if(mMap == null)    return;
 
-        mMap.addMarker(new MarkerOptions()
-                .position(goal)
-                .title("ゴールだよ！")
-                .icon(BitmapDescriptorFactory.fromResource(R.drawable.ic_goal)));
         // マップオブジェクトを取得していた場合はマーカーをセットする
         mMap.clear();
         for(SerialMarkerOptions smo : markerList){
             mMap.addMarker(smo.createMarkerOptions());
         }
+        putGoal(goal.latitude, goal.longitude);
         flagCount = markerList.size() + 1;
     }
 
@@ -268,7 +289,8 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         mMap.addMarker(new MarkerOptions()
                 .position(goal)
                 .title("ゴールだよ！")
-                .icon(BitmapDescriptorFactory.fromResource(R.drawable.ic_goal)));
+                .icon(BitmapDescriptorFactory.fromResource(R.drawable.ic_goal))
+                .draggable(true));
     }
 
     /**
@@ -276,7 +298,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
      * @param latitude 緯度
      * @param longitude 軽度
      */
-    private void putFlag(double latitude, double longitude){
+    private void putMarker(double latitude, double longitude){
         String title = String.valueOf(flagCount) + "本目";
         MarkerOptions options = new MarkerOptions();
         options.position(new LatLng(latitude, longitude));
@@ -354,7 +376,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
             markerList = (ArrayList<SerialMarkerOptions>)ois.readObject();
             ois.close();
 
-            updateMap();
+            refreshMap();
         } catch (IOException | ClassNotFoundException e) {
             e.printStackTrace();
         }
@@ -377,19 +399,21 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
         double diffLatitude = (latitude - oldLatitude) * 100000;
         double diffLongitude = (longitude - oldLongitude) * 100000;
+        double length_2 = diffLatitude * diffLatitude + diffLongitude * diffLongitude;
 
         // あまり動いていない場合は処理を実行しない
-        if(diffLatitude * diffLatitude + diffLongitude * diffLongitude < 100){
+        if(length_2 < 100){
             return;
         }
+        float zoomCoefficient = 3f + (float)(60 / Math.pow(length_2, 0.3));
 
         Toast.makeText(this, location.toString(), Toast.LENGTH_SHORT).show();
         CameraPosition currentPlace = new CameraPosition.Builder()
-                .target(new LatLng(latitude, longitude)).zoom(15.5f)
+                .target(new LatLng(latitude, longitude)).zoom(zoomCoefficient)
                 .bearing(location.getBearing()).build();
         mMap.animateCamera(CameraUpdateFactory.newCameraPosition(currentPlace));
         // マーカーの作成
-        putFlag(latitude, longitude);
+        putMarker(latitude, longitude);
 
         // ***** 目的地到着判定 *****
         if(goal != null) {
@@ -411,7 +435,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
     /** TODO サーバーから情報を受け取った時に呼ばれる
      * {"status" : "true",
-     *  "data" : [{"type" : "information", "division" : "news", "value" : "アイテム発見！"},
+     *  "data" : [{"type" : "information", "division" : "news", "message" : "アイテム発見！"},
      *            {"type" : "point", "points" : [{"team" : "honda", "lat" : "35.55555", "long" : "132.33333"},
      *                                           {"team" : "nike", "lat" : "35.55555", "long" : "132.33333"}]},
      *            {"type" : "comment", "comments" : []},
@@ -426,6 +450,36 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                     return;
                 }
                 JSONArray serverData = json.getJSONArray("data");
+
+                for(int i = 0; i < serverData.length(); i++) {
+                    JSONObject block = serverData.getJSONObject(i);
+
+                    String type = block.getString("type");
+                    switch (type) {
+                        case SERVER_DATA_TYPE_INFORMATION: {
+                            String division = block.getString("division");
+                            String message = block.getString("message");
+                            break;
+                        }
+                        case SERVER_DATA_TYPE_POINT: {
+                            JSONArray points = block.getJSONArray("points");
+
+                            break;
+                        }
+                        case SERVER_DATA_TYPE_COMMENT: {
+                            JSONArray comments = block.getJSONArray("comments");
+
+                            break;
+                        }
+                        case SERVER_DATA_TYPE_REFERENCE: {
+                            String division = block.getString("division");
+                            String value = block.getString("value");
+                            break;
+                        }
+                        default:
+                            Toast.makeText(MapsActivity.this, "不明コマンドタイプ:" + type, Toast.LENGTH_SHORT).show();
+                    }
+                }
 
             } catch (JSONException e) {
                 e.printStackTrace();

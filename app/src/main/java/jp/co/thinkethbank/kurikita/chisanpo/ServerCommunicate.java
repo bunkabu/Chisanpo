@@ -16,6 +16,17 @@ public class ServerCommunicate extends AsyncTask<Object, Void, String> {
 
     @Override
     protected String doInBackground(Object... params) {
+        int type = (int)params[0];
+
+        switch(type){
+            case SEND_TYPE_POSITION:
+                break;
+            case SEND_TYPE_GET_ITEM:
+                break;
+            case SEND_TYPE_OTHER_TEAM:
+                break;
+        }
+
         return null;
     }
 
