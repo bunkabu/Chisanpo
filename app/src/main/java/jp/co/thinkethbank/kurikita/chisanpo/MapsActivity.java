@@ -4,18 +4,22 @@ import android.app.Activity;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.graphics.Bitmap;
-import android.graphics.Matrix;
 import android.location.Location;
 import android.provider.MediaStore;
 import android.support.v4.app.FragmentActivity;
 import android.os.Bundle;
 import android.support.v7.app.AlertDialog;
 import android.text.InputType;
+import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import com.dropbox.client2.DropboxAPI;
@@ -37,17 +41,24 @@ import com.google.android.gms.maps.model.GroundOverlay;
 import com.google.android.gms.maps.model.GroundOverlayOptions;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.MarkerOptions;
+import com.parse.FindCallback;
+import com.parse.Parse;
+import com.parse.ParseException;
+import com.parse.ParseObject;
+import com.parse.ParseQuery;
 
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.util.ArrayList;
+import java.util.List;
 
 import jp.co.thinkethbank.kurikita.chisanpo.entity.SerialMarkerOptions;
 
@@ -68,17 +79,21 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
     private static final double VALUE_GOAL_RANGE = 900;
 
+    /** memberId */
+    private String user;
+
     /** ドロップボックスのAPI */
-    private DropboxAPI<AndroidAuthSession> mApi;
+    private DropboxAPI<AndroidAuthSession> dropboxAPI;
 
     private GoogleMap mMap; // Might be null if Google Play services APK is not available.
     private GoogleApiClient googleApiClient = null;
+    private TextView infoText;
     /** 立てたマーカーをリスト化して保持する */
     private ArrayList<SerialMarkerOptions> markerList;
-
+    /** 現在位置を取得する頻度の設定 */
     private static final LocationRequest REQUEST = LocationRequest.create()
             .setInterval(20000) // 20 seconds
-            .setFastestInterval(333) // 33ms = 30fps
+            .setFastestInterval(6000) // 6 seconds
             .setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
 
     /** 立てたフラグの本数 */
@@ -89,12 +104,23 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     private double oldLongitude;
     // TODO 後で消すよ
     private LatLng goal;
+    private ArrayList<LatLng> goals;
     private LatLng keepGoal;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_maps);
+        // ***** レイアウトの設定 *****
+        ImageButton settingButton = (ImageButton)findViewById(R.id.settingButton);
+        settingButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openOptionsMenu();
+            }
+        });
+        infoText = (TextView)findViewById(R.id.infoText);
+        infoText.setVisibility(View.INVISIBLE);
         setUpMapIfNeeded();
 
         // ***** 各初期化処理 *****
@@ -103,6 +129,9 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         oldLongitude = 0;
         markerList = new ArrayList<>();
         putGoal(35.6647104, 139.7435281);
+        setupParams();
+        setupDropBox();
+        setupParse();
     }
 
     @Override
@@ -110,7 +139,10 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         super.onResume();
         googleApiClient.connect();
         // TODO 面倒臭いから後で
-        AndroidAuthSession session = mApi.getSession();
+        if(dropboxAPI.getSession().authenticationSuccessful()) {
+            dropboxAPI.getSession().finishAuthentication();
+            String accessToken = dropboxAPI.getSession().getOAuth2AccessToken();
+        }
     }
 
     @Override
@@ -121,6 +153,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     @Override
     protected void onStop() {
         googleApiClient.disconnect();
+        saveParams();
         super.onStop();
     }
 
@@ -158,10 +191,11 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        // カメラ
         if(REQUEST_CAPTURE_IMAGE == requestCode && resultCode == Activity.RESULT_OK ){
             // 撮影した写真
             Bitmap takePic = (Bitmap)data.getExtras().get("data");
-            takePic = resizePicture(takePic, 480);
+            takePic = BitmapEditor.resizePicture(takePic, 480);
             float takePicWidth = takePic.getWidth() * RESIZE_PICTURE_RATE;
             float takePicHeight = takePic.getHeight() * RESIZE_PICTURE_RATE;
 
@@ -177,10 +211,28 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
             overlay.setTransparency(0.3F);
 
             // ************ ここから写真アップロード ************
-            /*
-            UploadPicture uploadPicture = new UploadPicture(this. mApi, )
-            */
+            byte[] jpegStream = BitmapEditor.compressJpeg(takePic, 80);
+            if(jpegStream != null) {
+                UploadPicture uploadPicture = new UploadPicture(this, dropboxAPI, String.valueOf(oldLatitude) + ".jpg",
+                        new ByteArrayInputStream(jpegStream), jpegStream.length);
+                uploadPicture.execute();
+            }
         }
+    }
+
+    /** 各パラメータの取得 */
+    private void setupParams(){
+        //params = PreferenceManager.getDefaultSharedPreferences(this);
+        // user = params.getString(PARAMS_USER_NAME, null);
+    }
+
+    private void saveParams(){
+        // SharedPreferences.Editor editor =  params.edit();
+        if(user != null){
+            // editor.putString(PARAMS_USER_NAME, user);
+
+        }
+        // editor.apply();
     }
 
     /**
@@ -217,8 +269,14 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         }
     }
 
+    /** グーグルマップの初期設定 */
     private void setUpMap() {
         mMap.setMyLocationEnabled(true);
+        // カメラの初期位置の設定
+        mMap.moveCamera(CameraUpdateFactory.newCameraPosition(
+                new CameraPosition(new LatLng(35.688224, 139.6985579), 15f, 0f, 0f)
+        ));
+
         UiSettings settings = mMap.getUiSettings();
         // コンパスの有効化
         settings.setCompassEnabled(true);
@@ -234,8 +292,77 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
     private void setupDropBox(){
         AndroidAuthSession session = new AndroidAuthSession(new AppKeyPair("flu2b0urtc18egm", "kroennf800x63fa"));
-        mApi = new DropboxAPI<AndroidAuthSession>(session);
-        mApi.getSession().startOAuth2Authentication(this);
+        dropboxAPI = new DropboxAPI<>(session);
+
+        if(!dropboxAPI.getSession().authenticationSuccessful()){
+            dropboxAPI.getSession().startOAuth2Authentication(this);
+        }
+    }
+
+    private void setupParse(){
+        Parse.enableLocalDatastore(this);
+        Parse.initialize(this, "aXB8YYKBnz7JG6Jdhi2vhdjo2PkkdFDZU9CPCHYO", "Tl2OJP50LvPluTJ2sxvJpdazFebQRfB0sTsLT8wa");
+
+        // ローカルデータストアからユーザー情報を取得
+        final ParseQuery<ParseObject> query = ParseQuery.getQuery("Members");
+        query.fromLocalDatastore();
+        query.findInBackground(new FindCallback<ParseObject>() {
+            public void done(List<ParseObject> memberList, ParseException e) {
+                if (e == null) {
+                    Log.d("score", "Retrieved " + memberList.size() + " scores");
+
+                    // ローカルに保存されていな場合は登録
+                    if(memberList.size() == 0){
+                        final EditText et = new EditText(MapsActivity.this);
+                        et.setInputType(InputType.TYPE_CLASS_TEXT);
+                        et.setHint("サイボウズのあれ");
+                        final AlertDialog dialog = new AlertDialog.Builder(MapsActivity.this).setTitle("ユーザー名の入力").setView(et)
+                                .setMessage("ユーザー名を入力してください")
+                                .setCancelable(false)
+                                .setPositiveButton("OK", null)
+                        .show();
+
+                        // OKボタンが押された時
+                        Button button = dialog.getButton(DialogInterface.BUTTON_POSITIVE);
+                        button.setOnClickListener(new View.OnClickListener() {
+                            @Override
+                            public void onClick(View v) {
+                                String inputMember = et.getText().toString();
+                                if(!inputMember.isEmpty()){
+                                    ParseQuery<ParseObject> query = ParseQuery.getQuery("Members");
+                                    // 入力した名前の人がいるかどうか
+                                    query.whereEqualTo("memberId", inputMember);
+                                    query.findInBackground(new FindCallback<ParseObject>() {
+                                        public void done(List<ParseObject> cloudMemberList, ParseException e) {
+                                            if (e == null) {
+                                                Log.d("score", "Retrieved " + cloudMemberList.size() + " scores");
+                                                // 存在しない場合
+                                                if (cloudMemberList.size() == 0){
+                                                   dialog.setMessage("存在しない名前です");
+                                                }else{
+                                                    ParseObject cloudMember = cloudMemberList.get(0);
+                                                    user = (String)cloudMember.get("memberId");
+                                                    cloudMember.pinInBackground();
+
+                                                    dialog.dismiss();
+                                                }
+                                            } else {
+                                                Log.d("member name", "Error: " + e.getMessage());
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        });
+                    }else{
+                        ParseObject member = memberList.get(0);
+                        user = (String)member.get("memberId");
+                    }
+                } else {
+                    Log.d("score", "Error: " + e.getMessage());
+                }
+            }
+        });
     }
 
     private void makeSetGoalDialog(){
@@ -310,7 +437,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
     /**
      * 目標地点に到達した時
-     * @param itemId 目標のID
+     * @param itemId 目標アイテムID
      * @param position 到達位置
      */
     private void reachPoint(int itemId, LatLng position){
@@ -335,26 +462,9 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                 .show();
     }
 
-    /**
-     * Bitmapをリサイズする
-     * @param src スケーリングするBitmap
-     * @param shortLength ソース画像の短い方の辺のスケーリング後のサイズ
-     * @return リサイズ後のBitmap
-     */
-    private Bitmap resizePicture(Bitmap src, int shortLength){
-        int srcWidth = src.getWidth();
-        int srcHeight = src.getHeight();
-        float scaleRate;
-
-        if(srcWidth < srcHeight){
-            scaleRate = (float)shortLength / srcWidth;
-        }else{
-            scaleRate = (float)shortLength / srcHeight;
-        }
-        Matrix matrix = new Matrix();
-        matrix.postScale(scaleRate, scaleRate);
-
-        return Bitmap.createBitmap(src, 0, 0, srcWidth, srcHeight, matrix, true);
+    void setInfoText(String message){
+        // infoText.setVisibility(View.VISIBLE);
+        // infoText.setText(message);
     }
 
     private void saveMarkerList(){
@@ -405,9 +515,12 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         if(length_2 < 100){
             return;
         }
-        float zoomCoefficient = 3f + (float)(60 / Math.pow(length_2, 0.3));
 
-        Toast.makeText(this, location.toString(), Toast.LENGTH_SHORT).show();
+        // TODO ズームの設定方法が違う
+//        float zoomCoefficient = 3f + (float)(60 / Math.pow(length_2, 0.3));
+        float zoomCoefficient = 12f;
+
+        Toast.makeText(this, location.toString() + " length:" + length_2 + " zoom:" + zoomCoefficient, Toast.LENGTH_SHORT).show();
         CameraPosition currentPlace = new CameraPosition.Builder()
                 .target(new LatLng(latitude, longitude)).zoom(zoomCoefficient)
                 .bearing(location.getBearing()).build();
@@ -430,7 +543,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
     @Override
     public void onConnectionFailed(ConnectionResult connectionResult) {
-
+        Toast.makeText(this, "なんかGoogleMapへの接続に失敗しました", Toast.LENGTH_LONG).show();
     }
 
     /** TODO サーバーから情報を受け取った時に呼ばれる
@@ -459,6 +572,12 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                         case SERVER_DATA_TYPE_INFORMATION: {
                             String division = block.getString("division");
                             String message = block.getString("message");
+
+                            if(division == null){
+                                setInfoText("ERROR : " + message);
+                            }else {
+                                setInfoText(message);
+                            }
                             break;
                         }
                         case SERVER_DATA_TYPE_POINT: {

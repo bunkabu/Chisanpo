@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">ChiSanpo</string>
-    <string name="title_activity_maps">Map</string>
+    <string name="title_activity_maps">ChiSanpo</string>
+    <string name="icon_menu">メニューを開きます</string>
 </resources>
