@@ -79,6 +79,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
     private static final double VALUE_GOAL_RANGE = 900;
 
+
     /** memberId */
     private String user;
 
