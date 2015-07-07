@@ -44,6 +44,7 @@ import com.google.android.gms.maps.model.MarkerOptions;
 import com.parse.FindCallback;
 import com.parse.Parse;
 import com.parse.ParseException;
+import com.parse.ParseGeoPoint;
 import com.parse.ParseObject;
 import com.parse.ParseQuery;
 
@@ -60,7 +61,14 @@ import java.io.ObjectOutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
+import jp.co.thinkethbank.kurikita.chisanpo.entity.DropboxUtils;
 import jp.co.thinkethbank.kurikita.chisanpo.entity.SerialMarkerOptions;
+
+/*
+リソースの閲覧とか
+http://androiddrawables.com/
+*/
+
 
 public class MapsActivity extends FragmentActivity implements GoogleApiClient.OnConnectionFailedListener, LocationListener, GoogleApiClient.ConnectionCallbacks {
     /** カメラアクティビティの識別子 */
@@ -69,8 +77,9 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
     private static final int MENU_SAVE = 0;
     private static final int MENU_LOAD = 1;
-    private static final int MENU_SET_GOAL = 2;
-    private static final int MENU_TAKE_PHOTO = 3;
+    private static final int MENU_TAKE_PHOTO = 2;
+    private static final int MENU_MISC = 3;
+    private static final int MENU_ADMIN_SUB_MENU = 4;
 
     private static final String SERVER_DATA_TYPE_INFORMATION = "information";
     private static final String SERVER_DATA_TYPE_POINT = "point";
@@ -79,16 +88,21 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
     private static final double VALUE_GOAL_RANGE = 900;
 
-
     /** memberId */
     private String user;
+    private boolean isAdmin = false;
 
     /** ドロップボックスのAPI */
     private DropboxAPI<AndroidAuthSession> dropboxAPI;
+    private DropboxUtils dropboxUtils;
 
-    private GoogleMap mMap; // Might be null if Google Play services APK is not available.
+    private GoogleMap gMap; // Might be null if Google Play services APK is not available.
     private GoogleApiClient googleApiClient = null;
     private TextView infoText;
+
+    /** parse用 */
+    ParseObject geoPosition;
+
     /** 立てたマーカーをリスト化して保持する */
     private ArrayList<SerialMarkerOptions> markerList;
     /** 現在位置を取得する頻度の設定 */
@@ -103,10 +117,10 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     private double oldLatitude;
     /** 前回の軽度 */
     private double oldLongitude;
-    // TODO 後で消すよ
-    private LatLng goal;
-    private ArrayList<LatLng> goals;
     private LatLng keepGoal;
+
+    private ArrayList<MarkerOptions> goals;
+    private List<ParseObject> parseGoals;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -129,7 +143,6 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         oldLatitude = 0;
         oldLongitude = 0;
         markerList = new ArrayList<>();
-        putGoal(35.6647104, 139.7435281);
         setupParams();
         setupDropBox();
         setupParse();
@@ -139,10 +152,12 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     protected void onResume() {
         super.onResume();
         googleApiClient.connect();
-        // TODO 面倒臭いから後で
+
         if(dropboxAPI.getSession().authenticationSuccessful()) {
             dropboxAPI.getSession().finishAuthentication();
-            String accessToken = dropboxAPI.getSession().getOAuth2AccessToken();
+            dropboxUtils.storeOauth2AccessToken(dropboxAPI.getSession().getOAuth2AccessToken());
+
+            Toast.makeText(this, "Dropboxの認証に成功しました", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -163,8 +178,11 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     public boolean onCreateOptionsMenu(Menu menu) {
         menu.add(Menu.NONE, MENU_SAVE, Menu.NONE, "保存");
         menu.add(Menu.NONE, MENU_LOAD, Menu.NONE, "読込");
-        menu.add(Menu.NONE, MENU_SET_GOAL, Menu.NONE, "目的地設定");
         menu.add(Menu.NONE, MENU_TAKE_PHOTO, Menu.NONE, "撮影");
+        menu.add(Menu.NONE, MENU_MISC, Menu.NONE, "雑務");
+        if(isAdmin){
+            menu.add(Menu.NONE, MENU_ADMIN_SUB_MENU, Menu.NONE, "管理者メニュー");
+        }
         return true;
     }
 
@@ -177,13 +195,57 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
             case MENU_LOAD:
                 loadMarkerList();
                 return true;
-            case MENU_SET_GOAL:
-                makeSetGoalDialog();
-                return true;
             case MENU_TAKE_PHOTO:
                 if(markerList.size() != 0){
                     SerialMarkerOptions serialMarkerOptions = markerList.get(markerList.size() - 1);
                     reachPoint(0, new LatLng(serialMarkerOptions.latitude, serialMarkerOptions.longitude));
+                }
+                return true;
+            case MENU_MISC:
+                Toast.makeText(this, "今は何もないよ", Toast.LENGTH_SHORT).show();
+                return true;
+            case MENU_ADMIN_SUB_MENU:
+                if(isAdmin) {
+                    AlertDialog.Builder listDialog = new AlertDialog.Builder(this);
+                    listDialog
+                            .setTitle("管理者メニュー")
+                            .setItems(new String[]{"ゴールの設定(工事中)", "アカウント削除して終了", "ズーム13.7", "ズーム20"}, new DialogInterface.OnClickListener() {
+                                @Override
+                                public void onClick(DialogInterface dialog, int which) {
+                                    switch(which){
+                                        case 0:
+                                            makeSetGoalDialog();
+                                            break;
+                                        case 1:
+                                            // ローカルデータからユーザー情報を抹消
+                                            ParseQuery<ParseObject> query = ParseQuery.getQuery("Members");
+                                            query.fromLocalDatastore();
+                                            query.findInBackground(new FindCallback<ParseObject>() {
+                                                @Override
+                                                public void done(List<ParseObject> list, ParseException e) {
+                                                    if(e == null){
+                                                        if(list.size() != 0){
+                                                            ParseObject member = list.get(0);
+                                                            member.unpinInBackground();
+                                                            Toast.makeText(MapsActivity.this, "保存されているユーザー情報を削除しました", Toast.LENGTH_SHORT).show();
+                                                            finish();
+                                                        }else{
+                                                            Toast.makeText(MapsActivity.this, "保存されているユーザー情報がありません", Toast.LENGTH_SHORT).show();
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                            break;
+                                        case 2:
+                                            gMap.moveCamera(CameraUpdateFactory.zoomTo(13.7f));
+                                            break;
+                                        case 3:
+                                            gMap.moveCamera(CameraUpdateFactory.zoomTo(20));
+                                            break;
+                                    }
+                                }
+                            })
+                            .show();
                 }
                 return true;
         }
@@ -196,7 +258,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         if(REQUEST_CAPTURE_IMAGE == requestCode && resultCode == Activity.RESULT_OK ){
             // 撮影した写真
             Bitmap takePic = (Bitmap)data.getExtras().get("data");
-            takePic = BitmapEditor.resizePicture(takePic, 480);
+            takePic = BitmapEditor.resizePicture(takePic, 640);
             float takePicWidth = takePic.getWidth() * RESIZE_PICTURE_RATE;
             float takePicHeight = takePic.getHeight() * RESIZE_PICTURE_RATE;
 
@@ -207,7 +269,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
             options.anchor(0.5f, 0.5f);
             options.position(keepGoal, takePicWidth, takePicHeight);
             // マップに貼り付け・アルファを設定
-            GroundOverlay overlay = mMap.addGroundOverlay(options);
+            GroundOverlay overlay = gMap.addGroundOverlay(options);
             // 透過率の設定
             overlay.setTransparency(0.3F);
 
@@ -219,6 +281,15 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                 uploadPicture.execute();
             }
         }
+    }
+
+    private void setup(){
+        setGeoPosition();
+        putGoal();
+    }
+
+    private void setupAdmin(){
+        isAdmin = true;
     }
 
     /** 各パラメータの取得 */
@@ -239,7 +310,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     /**
      * Sets up the map if it is possible to do so (i.e., the Google Play services APK is correctly
      * installed) and the map has not already been instantiated.. This will ensure that we only ever
-     * call {@link #setUpMap()} once when {@link #mMap} is not null.
+     * call {@link #setUpMap()} once when {@link #gMap} is not null.
      * <p/>
      * If it isn't installed {@link SupportMapFragment} (and
      * {@link com.google.android.gms.maps.MapView MapView}) will show a prompt for the user to
@@ -258,13 +329,9 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                 .addOnConnectionFailedListener(this)
                 .build();
 
-        // Do a null check to confirm that we have not already instantiated the map.
-        if (mMap == null) {
-            // Try to obtain the map from the SupportMapFragment.
-            mMap = ((SupportMapFragment) getSupportFragmentManager().findFragmentById(R.id.map))
-                    .getMap();
-            // Check if we were successful in obtaining the map.
-            if (mMap != null) {
+        if (gMap == null) {
+            gMap = ((SupportMapFragment) getSupportFragmentManager().findFragmentById(R.id.map)).getMap();
+            if (gMap != null) {
                 setUpMap();
             }
         }
@@ -272,13 +339,13 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
     /** グーグルマップの初期設定 */
     private void setUpMap() {
-        mMap.setMyLocationEnabled(true);
+        gMap.setMyLocationEnabled(true);
         // カメラの初期位置の設定
-        mMap.moveCamera(CameraUpdateFactory.newCameraPosition(
+        gMap.moveCamera(CameraUpdateFactory.newCameraPosition(
                 new CameraPosition(new LatLng(35.688224, 139.6985579), 15f, 0f, 0f)
         ));
 
-        UiSettings settings = mMap.getUiSettings();
+        UiSettings settings = gMap.getUiSettings();
         // コンパスの有効化
         settings.setCompassEnabled(true);
         // 現在位置に移動するボタンの有効化
@@ -292,11 +359,14 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     }
 
     private void setupDropBox(){
-        AndroidAuthSession session = new AndroidAuthSession(new AppKeyPair("flu2b0urtc18egm", "kroennf800x63fa"));
-        dropboxAPI = new DropboxAPI<>(session);
+        dropboxUtils = new DropboxUtils(this);
 
-        if(!dropboxAPI.getSession().authenticationSuccessful()){
+        if(!dropboxUtils.hasLoadAndroidAuthSession()){
+            AndroidAuthSession session = new AndroidAuthSession(new AppKeyPair("flu2b0urtc18egm", "kroennf800x63fa"));
+            dropboxAPI = new DropboxAPI<>(session);
             dropboxAPI.getSession().startOAuth2Authentication(this);
+        }else{
+            dropboxAPI = new DropboxAPI<>(dropboxUtils.loadAndroidAuthSession());
         }
     }
 
@@ -313,7 +383,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                     Log.d("score", "Retrieved " + memberList.size() + " scores");
 
                     // ローカルに保存されていな場合は登録
-                    if(memberList.size() == 0){
+                    if (memberList.size() == 0) {
                         final EditText et = new EditText(MapsActivity.this);
                         et.setInputType(InputType.TYPE_CLASS_TEXT);
                         et.setHint("サイボウズのあれ");
@@ -321,7 +391,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                                 .setMessage("ユーザー名を入力してください")
                                 .setCancelable(false)
                                 .setPositiveButton("OK", null)
-                        .show();
+                                .show();
 
                         // OKボタンが押された時
                         Button button = dialog.getButton(DialogInterface.BUTTON_POSITIVE);
@@ -329,7 +399,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                             @Override
                             public void onClick(View v) {
                                 String inputMember = et.getText().toString();
-                                if(!inputMember.isEmpty()){
+                                if (!inputMember.isEmpty()) {
                                     ParseQuery<ParseObject> query = ParseQuery.getQuery("Members");
                                     // 入力した名前の人がいるかどうか
                                     query.whereEqualTo("memberId", inputMember);
@@ -338,14 +408,20 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                                             if (e == null) {
                                                 Log.d("score", "Retrieved " + cloudMemberList.size() + " scores");
                                                 // 存在しない場合
-                                                if (cloudMemberList.size() == 0){
-                                                   dialog.setMessage("存在しない名前です");
-                                                }else{
+                                                if (cloudMemberList.size() == 0) {
+                                                    dialog.setMessage("存在しない名前です");
+                                                } else {
                                                     ParseObject cloudMember = cloudMemberList.get(0);
-                                                    user = (String)cloudMember.get("memberId");
+                                                    user = (String) cloudMember.get("memberId");
+                                                    // 権限者だった場合
+                                                    if ((int) cloudMember.get("rank") == 9) {
+                                                        setupAdmin();
+                                                    }
                                                     cloudMember.pinInBackground();
 
                                                     dialog.dismiss();
+                                                    Toast.makeText(MapsActivity.this, "ログインしました", Toast.LENGTH_SHORT).show();
+                                                    setup();
                                                 }
                                             } else {
                                                 Log.d("member name", "Error: " + e.getMessage());
@@ -355,9 +431,21 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                                 }
                             }
                         });
-                    }else{
+                    } else {
                         ParseObject member = memberList.get(0);
-                        user = (String)member.get("memberId");
+                        user = (String) member.get("memberId");
+
+                        if(member.get("rank") == null){
+                            member.unpinInBackground();
+                            finish();
+                        }else {
+                            // 権限者だった場合
+                            if ((int) member.get("rank") == 9) {
+                                setupAdmin();
+                            }
+                            Toast.makeText(MapsActivity.this, "ログインしました:" + user, Toast.LENGTH_SHORT).show();
+                            setup();
+                        }
                     }
                 } else {
                     Log.d("score", "Error: " + e.getMessage());
@@ -366,6 +454,23 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         });
     }
 
+    /** Parseの機能を利用してアプリを利用するユーザーの位置情報を保管するオブジェクトを生成 */
+    private void setGeoPosition(){
+        ParseQuery<ParseObject> query = ParseQuery.getQuery("GeoPosition");
+        query.whereEqualTo("memberId", user);
+        query.findInBackground(new FindCallback<ParseObject>() {
+            @Override
+            public void done(List<ParseObject> list, ParseException e) {
+                if (list.size() != 0) {
+                    geoPosition = list.get(0);
+                } else {
+                    Toast.makeText(MapsActivity.this, "Parseから位置情報データの取得に失敗しました:" + user, Toast.LENGTH_LONG).show();
+                }
+            }
+        });
+    }
+
+    // TODO 仕様が大幅に変更なる
     private void makeSetGoalDialog(){
         final EditText editText1 = new EditText(this);
         editText1.setInputType(InputType.TYPE_CLASS_NUMBER);
@@ -394,31 +499,78 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                         if(s1.isEmpty() || s2.isEmpty()){
                             return;
                         }
-                        putGoal(Double.parseDouble(s1), Double.parseDouble(s2));
+                        putGoal();
                     }
                 });
         dialog.show();
     }
 
     private void refreshMap(){
-        if(mMap == null)    return;
+        if(gMap == null)    return;
 
         // マップオブジェクトを取得していた場合はマーカーをセットする
-        mMap.clear();
+        gMap.clear();
         for(SerialMarkerOptions smo : markerList){
-            mMap.addMarker(smo.createMarkerOptions());
+            gMap.addMarker(smo.createMarkerOptions());
         }
-        putGoal(goal.latitude, goal.longitude);
+        putGoal();
         flagCount = markerList.size() + 1;
     }
 
-    private void putGoal(double latitude, double longitude){
-        goal = new LatLng(latitude, longitude);
-        mMap.addMarker(new MarkerOptions()
-                .position(goal)
-                .title("ゴールだよ！")
-                .icon(BitmapDescriptorFactory.fromResource(R.drawable.ic_goal))
-                .draggable(true));
+    private void putGoal(){
+        ParseQuery<ParseObject> query = ParseQuery.getQuery("Treasure");
+        query.findInBackground(new FindCallback<ParseObject>() {
+            @Override
+            public void done(List<ParseObject> list, ParseException e) {
+                if(e == null) {
+                    if(goals == null){
+                        goals = new ArrayList<>();
+                    }else{
+                        goals.clear();
+                    }
+
+                    parseGoals = list;
+
+                    for(ParseObject treasure : list){
+                        ParseGeoPoint point = (ParseGeoPoint)treasure.get("position");
+                        String title = (String)treasure.get("name");
+                        int type = (int)treasure.get("typeId");
+                        int resourceId;
+
+                        switch(type){
+                            case 1:
+                                resourceId = R.drawable.ic_action_achievement_blue;
+                                break;
+                            case 2:
+                                resourceId = R.drawable.ic_action_achievement_green;
+                                break;
+                            case 3:
+                                resourceId = R.drawable.ic_action_achievement_red;
+                                break;
+                            default:
+                                resourceId = R.drawable.ic_action_achievement_yellow;
+                                break;
+                        }
+
+                        MarkerOptions marker = new MarkerOptions()
+                                .position(new LatLng(point.getLatitude(), point.getLongitude()))
+                                .title(title)
+                                .icon(BitmapDescriptorFactory.fromResource(resourceId));
+                        goals.add(marker);
+                        gMap.addMarker(marker);
+                    }
+
+
+                    if (list.size() != 0) {
+                        geoPosition = list.get(0);
+                    } else {
+                        Toast.makeText(MapsActivity.this, "Parseから位置情報データの取得に失敗しました:" + user, Toast.LENGTH_LONG).show();
+                    }
+                }else{
+                    Toast.makeText(MapsActivity.this, "目的地データの取得に失敗しました", Toast.LENGTH_LONG).show();
+                }
+            }
+        });
     }
 
     /**
@@ -431,7 +583,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         MarkerOptions options = new MarkerOptions();
         options.position(new LatLng(latitude, longitude));
         options.title(title);
-        mMap.addMarker(options);
+        gMap.addMarker(options);
         markerList.add(new SerialMarkerOptions(options));
         flagCount++;
     }
@@ -442,11 +594,25 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
      * @param position 到達位置
      */
     private void reachPoint(int itemId, LatLng position){
+        String goalTitle = null;
         keepGoal = position;
-        goal = null;
+
+        if(parseGoals != null){
+            for(ParseObject goal : parseGoals){
+                if((int)goal.get("treasureId") == itemId){
+                    goalTitle = (String)goal.get("name");
+                }
+            }
+            if(goalTitle == null){
+                goalTitle = "不明な目的地";
+            }
+        }else{
+            goalTitle = "不明な目的地";
+        }
+
         new AlertDialog.Builder(this)
-                .setTitle("おめでとう！！")
-                .setMessage("到着だよ")
+                .setTitle("おめでとう！")
+                .setMessage(goalTitle + "に到着しました")
                 .setPositiveButton("そうだよ", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
@@ -508,33 +674,46 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         double latitude = location.getLatitude();
         double longitude = location.getLongitude();
 
-        double diffLatitude = (latitude - oldLatitude) * 100000;
-        double diffLongitude = (longitude - oldLongitude) * 100000;
+        double diffLatitude = (latitude - oldLatitude) / 0.000008983148616;
+        double diffLongitude = (longitude - oldLongitude) / 0.000010966382364;
         double length_2 = diffLatitude * diffLatitude + diffLongitude * diffLongitude;
 
         // あまり動いていない場合は処理を実行しない
         if(length_2 < 100){
             return;
+        }else if(length_2 > 90000){
+            length_2 = 90000;
         }
 
-        // TODO ズームの設定方法が違う
-//        float zoomCoefficient = 3f + (float)(60 / Math.pow(length_2, 0.3));
-        float zoomCoefficient = 12f;
+        float zoomCoefficient = 12f + (float)(60 / (Math.pow(length_2, 0.3) + 4d));
 
-        Toast.makeText(this, location.toString() + " length:" + length_2 + " zoom:" + zoomCoefficient, Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, location.toString() + "\nlength:" + length_2 + "\nzoom:" + zoomCoefficient, Toast.LENGTH_SHORT).show();
         CameraPosition currentPlace = new CameraPosition.Builder()
                 .target(new LatLng(latitude, longitude)).zoom(zoomCoefficient)
                 .bearing(location.getBearing()).build();
-        mMap.animateCamera(CameraUpdateFactory.newCameraPosition(currentPlace));
+        gMap.animateCamera(CameraUpdateFactory.newCameraPosition(currentPlace));
         // マーカーの作成
         putMarker(latitude, longitude);
 
+        // ***** サーバーに送信 *****
+        if(geoPosition != null) {
+            ParseGeoPoint pos = (ParseGeoPoint) geoPosition.get("position");
+            pos.setLatitude(latitude);
+            pos.setLongitude(longitude);
+            geoPosition.saveInBackground();
+        }
+
         // ***** 目的地到着判定 *****
-        if(goal != null) {
-            double diffGoalLatitude = (goal.latitude - latitude) * 100000;
-            double diffGoalLongitude = (goal.longitude - longitude) * 100000;
-            if (diffGoalLatitude * diffGoalLatitude + diffGoalLongitude * diffGoalLongitude < VALUE_GOAL_RANGE) {
-                reachPoint(0, goal);
+        if(goals != null){
+            for(int i = 0; i < goals.size(); i++){
+                MarkerOptions goal = goals.get(i);
+
+                double diffGoalLatitude = (goal.getPosition().latitude - latitude) * 100000;
+                double diffGoalLongitude = (goal.getPosition().longitude - longitude) * 100000;
+
+                if (diffGoalLatitude * diffGoalLatitude + diffGoalLongitude * diffGoalLongitude < VALUE_GOAL_RANGE) {
+                    reachPoint((int)parseGoals.get(i).get("treasureId"), goal.getPosition());
+                }
             }
         }
 
