@@ -1,11 +1,13 @@
 package jp.co.thinkethbank.kurikita.chisanpo;
 
+import android.content.res.AssetManager;
+import android.graphics.Color;
+import android.util.Xml;
 import android.app.Activity;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.location.Location;
-import android.os.AsyncTask;
 import android.provider.MediaStore;
 import android.support.v4.app.FragmentActivity;
 import android.os.Bundle;
@@ -16,6 +18,7 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageButton;
@@ -42,26 +45,36 @@ import com.google.android.gms.maps.model.GroundOverlay;
 import com.google.android.gms.maps.model.GroundOverlayOptions;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.MarkerOptions;
+import com.google.android.gms.maps.model.Marker;
+import com.google.android.gms.maps.model.PolylineOptions;
+import com.google.android.gms.maps.model.CircleOptions;
+import com.google.android.gms.maps.CameraUpdate;
+
 import com.parse.FindCallback;
 import com.parse.Parse;
 import com.parse.ParseException;
 import com.parse.ParseGeoPoint;
 import com.parse.ParseObject;
 import com.parse.ParseQuery;
-import com.parse.SaveCallback;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
 
 import java.io.ByteArrayInputStream;
-import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Calendar;
 import java.util.List;
-import java.util.TimeZone;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.util.Collections;
+import java.util.Comparator;
 
 import jp.co.thinkethbank.kurikita.chisanpo.entity.DropboxUtils;
 import jp.co.thinkethbank.kurikita.chisanpo.entity.SerialMarkerOptions;
@@ -73,13 +86,6 @@ http://androiddrawables.com/
 
 
 public class MapsActivity extends FragmentActivity implements GoogleApiClient.OnConnectionFailedListener, LocationListener, GoogleApiClient.ConnectionCallbacks {
-    private final int[] groupIconResources = new int[]{
-            R.drawable.ic_action_user_black, R.drawable.ic_action_user_blue, R.drawable.ic_action_user_green,
-            R.drawable.ic_action_user_holo, R.drawable.ic_action_user_purple, R.drawable.ic_action_user_red,
-            R.drawable.ic_action_user_yellow, R.drawable.ic_action_user_blue_l, R.drawable.ic_action_user_green_l,
-            R.drawable.ic_action_user_holo_l
-    };
-
     /** カメラアクティビティの識別子 */
     static final int REQUEST_CAPTURE_IMAGE = 100;
     private static final float RESIZE_PICTURE_RATE = 0.5f;
@@ -90,15 +96,16 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     private static final int MENU_MISC = 3;
     private static final int MENU_ADMIN_SUB_MENU = 4;
 
-    private static final int MAX_GROUP_NUM = 10;
+    private static final String SERVER_DATA_TYPE_INFORMATION = "information";
+    private static final String SERVER_DATA_TYPE_POINT = "point";
+    private static final String SERVER_DATA_TYPE_COMMENT = "comment";
+    private static final String SERVER_DATA_TYPE_REFERENCE = "reference";
+
     private static final double VALUE_GOAL_RANGE = 900;
 
     /** memberId */
     private String user;
     private boolean isAdmin = false;
-
-    /** キャッシュディレクトリ */
-    private File cacheDir;
 
     /** ドロップボックスのAPI */
     private DropboxAPI<AndroidAuthSession> dropboxAPI;
@@ -108,9 +115,8 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     private GoogleApiClient googleApiClient = null;
     private TextView infoText;
 
-    /** parse用。memberIdとpositionとmillisecUpdateしか持ってないよ */
-    private ParseObject geoPosition;
-    private Calendar cal = Calendar.getInstance(TimeZone.getTimeZone("Europe/London"));
+    /** parse用 */
+    ParseObject geoPosition;
 
     /** 立てたマーカーをリスト化して保持する */
     private ArrayList<SerialMarkerOptions> markerList;
@@ -130,12 +136,20 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
     private ArrayList<MarkerOptions> goals;
     private List<ParseObject> parseGoals;
-    private MarkerOptions[] groupIcons = new MarkerOptions[MAX_GROUP_NUM];
+
+    /** 神社リスト用 */
+    private List<Refuge> mRefugeList = new ArrayList<Refuge>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_maps);
+
+        /**
+         *画面をスリープにしない処理を追加
+         */
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
         // ***** レイアウトの設定 *****
         ImageButton settingButton = (ImageButton)findViewById(R.id.settingButton);
         settingButton.setOnClickListener(new View.OnClickListener() {
@@ -161,6 +175,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     @Override
     protected void onResume() {
         super.onResume();
+        setUpMapIfNeeded();
         googleApiClient.connect();
 
         if(dropboxAPI.getSession().authenticationSuccessful()) {
@@ -268,80 +283,27 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         if(REQUEST_CAPTURE_IMAGE == requestCode && resultCode == Activity.RESULT_OK ){
             // 撮影した写真
             Bitmap takePic = (Bitmap)data.getExtras().get("data");
-            Bitmap thumb = BitmapEditor.thumbnail(takePic);
             takePic = BitmapEditor.resizePicture(takePic, 640);
+            float takePicWidth = takePic.getWidth() * RESIZE_PICTURE_RATE;
+            float takePicHeight = takePic.getHeight() * RESIZE_PICTURE_RATE;
 
-            String fileName = String.valueOf(oldLatitude);
-            String comment = "シンクスバンクの綴りが分からん";
+            BitmapDescriptor descriptor = BitmapDescriptorFactory.fromBitmap(takePic);
+            // 貼り付ける設定
+            GroundOverlayOptions options = new GroundOverlayOptions();
+            options.image(descriptor);
+            options.anchor(0.5f, 0.5f);
+            options.position(keepGoal, takePicWidth, takePicHeight);
+            // マップに貼り付け・アルファを設定
+            GroundOverlay overlay = gMap.addGroundOverlay(options);
+            // 透過率の設定
+            overlay.setTransparency(0.3F);
 
-//            float takePicWidth = takePic.getWidth() * RESIZE_PICTURE_RATE;
-//            float takePicHeight = takePic.getHeight() * RESIZE_PICTURE_RATE;
-//
-//            BitmapDescriptor descriptor = BitmapDescriptorFactory.fromBitmap(takePic);
-//            // 貼り付ける設定
-//            GroundOverlayOptions options = new GroundOverlayOptions();
-//            options.image(descriptor);
-//            options.anchor(0.5f, 0.5f);
-//            options.position(keepGoal, takePicWidth, takePicHeight);
-//            // マップに貼り付け・アルファを設定
-//            GroundOverlay overlay = gMap.addGroundOverlay(options);
-//            // 透過率の設定
-//            overlay.setTransparency(0.3F);
-            MarkerOptions thumbMark = new MarkerOptions()
-                    .title(fileName)
-                    .position(new LatLng(oldLatitude, oldLongitude))
-                    .icon(BitmapDescriptorFactory.fromBitmap(thumb))
-                    .snippet(comment);
-            gMap.addMarker(thumbMark);
-
-            // ************ ローカルに保存 ************
-            File jpegFile = new File(cacheDir.getAbsolutePath(), fileName + ".jpg");
-            byte[] jpegStream = BitmapEditor.compressJpeg(takePic, 90);
-
-            File thumbFile = new File(cacheDir.getAbsolutePath(), fileName + ".thm");
-            byte[] thumbStream = BitmapEditor.compressJpeg(thumb, 70);
-
+            // ************ ここから写真アップロード ************
+            byte[] jpegStream = BitmapEditor.compressJpeg(takePic, 80);
             if(jpegStream != null) {
-                try {
-                    FileOutputStream saveFile = new FileOutputStream(jpegFile);
-                    saveFile.write(jpegStream, 0, jpegStream.length);
-                    saveFile.close();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-
-            if(thumbStream != null) {
-                try {
-                    FileOutputStream saveFile = new FileOutputStream(thumbFile);
-                    saveFile.write(thumbStream, 0, thumbStream.length);
-                    saveFile.close();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-
-            // ************ 写真アップロード ************
-            if(jpegStream != null) {
-                UploadPicture uploadPicture = new UploadPicture(this, dropboxAPI, fileName + ".jpg",
+                UploadPicture uploadPicture = new UploadPicture(this, dropboxAPI, String.valueOf(oldLatitude) + ".jpg",
                         new ByteArrayInputStream(jpegStream), jpegStream.length);
-                uploadPicture.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
-            }
-
-            if(thumbStream != null) {
-                UploadPicture uploadPicture = new UploadPicture(this, dropboxAPI, fileName + ".thm",
-                        new ByteArrayInputStream(thumbStream), thumbStream.length);
-                uploadPicture.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
-            }
-
-            // ************ parseにファイル名登録 ************
-            if(geoPosition != null) {
-                ParseObject imageFile = new ParseObject("ImageFile");
-                imageFile.put("fileName", fileName);
-                imageFile.put("memberId", geoPosition.get("memberId"));
-                imageFile.put("comment", comment);
-                imageFile.put("position", new ParseGeoPoint(oldLatitude, oldLongitude));
-                imageFile.saveInBackground();
+                uploadPicture.execute();
             }
         }
     }
@@ -357,14 +319,15 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
     /** 各パラメータの取得 */
     private void setupParams(){
-        cacheDir = getCacheDir();
+        //params = PreferenceManager.getDefaultSharedPreferences(this);
+        // user = params.getString(PARAMS_USER_NAME, null);
     }
 
     private void saveParams(){
         // SharedPreferences.Editor editor =  params.edit();
         if(user != null){
             // editor.putString(PARAMS_USER_NAME, user);
-            Log.i("saveParams", "execute save");
+
         }
         // editor.apply();
     }
@@ -418,6 +381,160 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         settings.setScrollGesturesEnabled(true);
         // ズームジェスチャー(ピンチイン・アウト)の有効化
         settings.setZoomGesturesEnabled(true);
+
+        mRefugeList.clear();
+        parseXML();
+        addMaker();
+
+        Refuge refuge = mRefugeList.get(0);
+        if (refuge != null) {
+            CameraUpdate cu = CameraUpdateFactory.newLatLngZoom(new LatLng(refuge.getLat(), refuge.getLng()), 15);
+            gMap.moveCamera(cu);
+        }
+        gMap.setOnMapClickListener(new GoogleMap.OnMapClickListener() {
+            @Override
+            public void onMapClick(LatLng latLng) {
+                calcDistance(latLng);
+                sortRefugeList();
+                updateMaker();
+                addLine(latLng);
+            }
+        });
+    }
+
+    private void addLine(LatLng point){
+
+        CircleOptions circleOptions = new CircleOptions()
+                .center(point)
+                        //.fillColor(Color.LTGRAY)
+                .radius(3);
+        gMap.addCircle(circleOptions);
+        for (Refuge refuge : mRefugeList) {
+            if (refuge != null) {
+                if (refuge.isNear()) {
+                    PolylineOptions polyOptions = new PolylineOptions();
+                    polyOptions.add(point);
+                    polyOptions.add(new LatLng(refuge.getLat(), refuge.getLng()));
+                    polyOptions.color(Color.GRAY);
+                    polyOptions.width(3);
+                    polyOptions.geodesic(true); //true:大圏コース,false:直線
+                    gMap.addPolyline(polyOptions);
+                }
+            }
+        }
+    }
+
+    private void updateMaker() {
+        int i = 0;
+        gMap.clear();
+        for (Refuge refuge : mRefugeList) {
+            if (refuge != null) {
+                MarkerOptions options = new MarkerOptions();
+                options.position(new LatLng(refuge.getLat(), refuge.getLng()));
+                options.title(refuge.getName() + " " + refuge.getDistance() + "m");
+                options.snippet(refuge.getAddress());
+                //アイコンを地井さんに設定する
+                BitmapDescriptor icon = BitmapDescriptorFactory.fromResource(R.mipmap.chi);
+                if (i > 2) {
+                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_MAGENTA);
+                    refuge.setNear(false);
+                } else {
+                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED);
+                    refuge.setNear(true);
+                }
+                options.icon(icon);
+                Marker marker = gMap.addMarker(options);
+                if (i == 0) {
+                    marker.showInfoWindow();
+                }
+                i++;
+            }
+        }
+    }
+    private void sortRefugeList(){
+        Collections.sort(mRefugeList, new Comparator<Refuge>() {
+            @Override
+            public int compare(Refuge lhs, Refuge rhs) {
+                return lhs.getDistance() - rhs.getDistance();
+            }
+        });
+    }
+    private void calcDistance(LatLng point){
+        // タッチした場所と避難所の距離を求める
+        double startLat = point.latitude;
+        double startLng = point.longitude;
+        // 結果を格納するための配列
+        float[] results = new float[3];
+        for (Refuge refuge : mRefugeList) {
+            if (refuge != null) {
+                Location.distanceBetween(startLat, startLng, refuge.getLat(), refuge.getLng(), results);
+                refuge.setDistance(results[0]);
+            }
+        }
+
+
+    }
+    private void parseXML() {
+        // AssetManagerの呼び出し
+        AssetManager assetManager = getResources().getAssets();
+        try {
+
+            // XMLファイルのストリーム情報を取得
+            InputStream is = assetManager.open("refuge_nonoichi.xml");
+            InputStreamReader inputStreamReader = new InputStreamReader(is);
+            XmlPullParser parser = Xml.newPullParser();
+            parser.setInput(inputStreamReader);
+            String title="";
+            String address="";
+            String lat = "";
+            String lon = "";
+
+            int eventType = parser.getEventType();
+            while (eventType != XmlPullParser.END_DOCUMENT) {
+                switch (eventType) {
+                    case XmlPullParser.START_TAG:
+                        String tag = parser.getName();
+                        if ("marker".equals(tag)) {
+                            title = parser.getAttributeValue(null,"title");
+                            address = parser.getAttributeValue(null,"adress");
+                            lat = parser.getAttributeValue(null,"lat");
+                            lon = parser.getAttributeValue(null,"lng");
+                        }
+                        break;
+                    case XmlPullParser.END_TAG:
+                        String endTag = parser.getName();
+                        if ("marker".equals(endTag)) {
+                            newRefuge(title, address,Double.valueOf(lat), Double.valueOf(lon));
+                        }
+                        break;
+                    case XmlPullParser.TEXT:
+                        break;
+                }
+                eventType = parser.next();
+            }
+        } catch (XmlPullParserException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+    }
+    private void newRefuge(String title,String address,double lat,double lon) {
+        Refuge refuge;
+        refuge = new Refuge(title,address,lat,lon);
+        mRefugeList.add(refuge);
+
+    }
+    private void addMaker() {
+        for (Refuge refuge : mRefugeList) {
+            if (refuge != null) {
+                MarkerOptions options = new MarkerOptions();
+                options.position(new LatLng(refuge.getLat(),refuge.getLng()));
+                options.title(refuge.getName());
+                options.snippet(refuge.getAddress());
+                gMap.addMarker(options);
+            }
+        }
     }
 
     private void setupDropBox(){
@@ -516,10 +633,9 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         });
     }
 
-    /** Parseの機能を利用してアプリを利用するユーザーとグループの位置情報を保管するオブジェクトを生成 */
+    /** Parseの機能を利用してアプリを利用するユーザーの位置情報を保管するオブジェクトを生成 */
     private void setGeoPosition(){
-        ParseQuery<ParseObject> query = ParseQuery.getQuery("Members");
-        query.selectKeys(Arrays.asList("memberId", "position", "millisecUpdate"));
+        ParseQuery<ParseObject> query = ParseQuery.getQuery("GeoPosition");
         query.whereEqualTo("memberId", user);
         query.findInBackground(new FindCallback<ParseObject>() {
             @Override
@@ -528,29 +644,6 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                     geoPosition = list.get(0);
                 } else {
                     Toast.makeText(MapsActivity.this, "Parseから位置情報データの取得に失敗しました:" + user, Toast.LENGTH_LONG).show();
-                }
-            }
-        });
-
-        ParseQuery<ParseObject> queryGroup = ParseQuery.getQuery("Group");
-        queryGroup.selectKeys(Arrays.asList("groupId", "groupGeo", "name"));
-        queryGroup.findInBackground(new FindCallback<ParseObject>() {
-            @Override
-            public void done(List<ParseObject> list, ParseException e) {
-                if (e == null) {
-                    for (ParseObject po : list) {
-                        int groupId = (int) po.get("groupId");
-                        ParseGeoPoint groupGeo = (ParseGeoPoint) po.get("groupGeo");
-
-                        if(groupId >= MAX_GROUP_NUM) continue;
-                        groupIcons[groupId] = new MarkerOptions()
-                                .icon(BitmapDescriptorFactory.fromResource(groupIconResources[groupId]))
-                                .position(new LatLng(groupGeo.getLatitude(), groupGeo.getLongitude()))
-                                .title((String) po.get("name"));
-                        gMap.addMarker(groupIcons[groupId]);
-                    }
-                } else {
-                    Toast.makeText(MapsActivity.this, "Parseからグループの位置情報データの取得に失敗しました", Toast.LENGTH_LONG).show();
                 }
             }
         });
@@ -645,6 +738,13 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                         goals.add(marker);
                         gMap.addMarker(marker);
                     }
+
+
+                    if (list.size() != 0) {
+                        geoPosition = list.get(0);
+                    } else {
+                        Toast.makeText(MapsActivity.this, "Parseから位置情報データの取得に失敗しました:" + user, Toast.LENGTH_LONG).show();
+                    }
                 }else{
                     Toast.makeText(MapsActivity.this, "目的地データの取得に失敗しました", Toast.LENGTH_LONG).show();
                 }
@@ -708,52 +808,6 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                 .show();
     }
 
-    /**
-     * 自分の位置をサーバーに送ると同時にサーバーからグループの位置を取得する
-     * @param latitude 緯度
-     * @param longitude 経度
-     */
-    private void syncPosition(double latitude, double longitude){
-        if(geoPosition != null) {
-            ParseGeoPoint pos = (ParseGeoPoint) geoPosition.get("position");
-            pos.setLatitude(latitude);
-            pos.setLongitude(longitude);
-
-            // 標準時の時間
-            geoPosition.put("millisecUpdate", cal.getTimeInMillis());
-            geoPosition.saveInBackground(new SaveCallback() {
-                @Override
-                public void done(ParseException e) {
-                    if(e != null){
-                        Toast.makeText(MapsActivity.this, e.getMessage(), Toast.LENGTH_LONG).show();
-                    }
-                }
-            });
-        }
-
-        ParseQuery<ParseObject> queryGroup = ParseQuery.getQuery("Group");
-        queryGroup.selectKeys(Arrays.asList("groupId", "groupGeo"));
-        queryGroup.findInBackground(new FindCallback<ParseObject>() {
-            @Override
-            public void done(List<ParseObject> list, ParseException e) {
-                if(e == null){
-                    for(ParseObject po : list){
-                        int groupId = (int)po.get("groupId");
-                        ParseGeoPoint groupGeo = (ParseGeoPoint)po.get("groupGeo");
-
-                        if(groupIcons[groupId] != null) {
-                            groupIcons[groupId].position(new LatLng(groupGeo.getLatitude(), groupGeo.getLongitude()));
-                        }else{
-                            groupIcons[groupId] = new MarkerOptions().position(new LatLng(groupGeo.getLatitude(), groupGeo.getLongitude()));
-                        }
-                    }
-                }else{
-                    Toast.makeText(MapsActivity.this, "Parseからグループの位置情報データの取得に失敗しました", Toast.LENGTH_LONG).show();
-                }
-            }
-        });
-    }
-
     void setInfoText(String message){
         // infoText.setVisibility(View.VISIBLE);
         // infoText.setText(message);
@@ -811,6 +865,8 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         }
 
         float zoomCoefficient = 12f + (float)(60 / (Math.pow(length_2, 0.3) + 4d));
+
+        Toast.makeText(this, location.toString() + "\nlength:" + length_2 + "\nzoom:" + zoomCoefficient, Toast.LENGTH_SHORT).show();
         CameraPosition currentPlace = new CameraPosition.Builder()
                 .target(new LatLng(latitude, longitude)).zoom(zoomCoefficient)
                 .bearing(location.getBearing()).build();
@@ -818,16 +874,21 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         // マーカーの作成
         putMarker(latitude, longitude);
 
-        // サーバーに位置情報の送信
-        syncPosition(latitude, longitude);
+        // ***** サーバーに送信 *****
+        if(geoPosition != null) {
+            ParseGeoPoint pos = (ParseGeoPoint) geoPosition.get("position");
+            pos.setLatitude(latitude);
+            pos.setLongitude(longitude);
+            geoPosition.saveInBackground();
+        }
 
         // ***** 目的地到着判定 *****
         if(goals != null){
             for(int i = 0; i < goals.size(); i++){
                 MarkerOptions goal = goals.get(i);
 
-                double diffGoalLatitude = (goal.getPosition().latitude - latitude) / 0.000008983148616;
-                double diffGoalLongitude = (goal.getPosition().longitude - longitude) / 0.000010966382364;
+                double diffGoalLatitude = (goal.getPosition().latitude - latitude) * 100000;
+                double diffGoalLongitude = (goal.getPosition().longitude - longitude) * 100000;
 
                 if (diffGoalLatitude * diffGoalLatitude + diffGoalLongitude * diffGoalLongitude < VALUE_GOAL_RANGE) {
                     reachPoint((int)parseGoals.get(i).get("treasureId"), goal.getPosition());
@@ -842,5 +903,66 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     @Override
     public void onConnectionFailed(ConnectionResult connectionResult) {
         Toast.makeText(this, "なんかGoogleMapへの接続に失敗しました", Toast.LENGTH_LONG).show();
+    }
+
+    /** TODO サーバーから情報を受け取った時に呼ばれる
+     * {"status" : "true",
+     *  "data" : [{"type" : "information", "division" : "news", "message" : "アイテム発見！"},
+     *            {"type" : "point", "points" : [{"team" : "honda", "lat" : "35.55555", "long" : "132.33333"},
+     *                                           {"team" : "nike", "lat" : "35.55555", "long" : "132.33333"}]},
+     *            {"type" : "comment", "comments" : []},
+     *            {"type" : "reference", "division" : "item", "value" : "true"}]} */
+    private class InformationReceive implements ServerCommunicate.OnReceiveFromServerCallback{
+        @Override
+        public void receiveCalc(String result) {
+            try {
+                JSONObject json = new JSONObject(result);
+                if(!json.getBoolean("status")){
+                    Toast.makeText(MapsActivity.this, "Jsonのパースに失敗しました", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                JSONArray serverData = json.getJSONArray("data");
+
+                for(int i = 0; i < serverData.length(); i++) {
+                    JSONObject block = serverData.getJSONObject(i);
+
+                    String type = block.getString("type");
+                    switch (type) {
+                        case SERVER_DATA_TYPE_INFORMATION: {
+                            String division = block.getString("division");
+                            String message = block.getString("message");
+
+                            if(division == null){
+                                setInfoText("ERROR : " + message);
+                            }else {
+                                setInfoText(message);
+                            }
+                            break;
+                        }
+                        case SERVER_DATA_TYPE_POINT: {
+                            JSONArray points = block.getJSONArray("points");
+
+                            break;
+                        }
+                        case SERVER_DATA_TYPE_COMMENT: {
+                            JSONArray comments = block.getJSONArray("comments");
+
+                            break;
+                        }
+                        case SERVER_DATA_TYPE_REFERENCE: {
+                            String division = block.getString("division");
+                            String value = block.getString("value");
+                            break;
+                        }
+                        default:
+                            Toast.makeText(MapsActivity.this, "不明コマンドタイプ:" + type, Toast.LENGTH_SHORT).show();
+                    }
+                }
+
+            } catch (JSONException e) {
+                e.printStackTrace();
+                Toast.makeText(MapsActivity.this, "Jsonのパースに失敗しました", Toast.LENGTH_SHORT).show();
+            }
+        }
     }
 }
