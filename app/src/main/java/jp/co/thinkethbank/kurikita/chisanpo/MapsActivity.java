@@ -1,5 +1,8 @@
 package jp.co.thinkethbank.kurikita.chisanpo;
 
+import android.content.res.AssetManager;
+import android.graphics.Color;
+import android.util.Xml;
 import android.app.Activity;
 import android.content.DialogInterface;
 import android.content.Intent;
@@ -15,6 +18,7 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageButton;
@@ -41,6 +45,11 @@ import com.google.android.gms.maps.model.GroundOverlay;
 import com.google.android.gms.maps.model.GroundOverlayOptions;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.MarkerOptions;
+import com.google.android.gms.maps.model.Marker;
+import com.google.android.gms.maps.model.PolylineOptions;
+import com.google.android.gms.maps.model.CircleOptions;
+import com.google.android.gms.maps.CameraUpdate;
+
 import com.parse.FindCallback;
 import com.parse.Parse;
 import com.parse.ParseException;
@@ -51,6 +60,8 @@ import com.parse.ParseQuery;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
 
 import java.io.ByteArrayInputStream;
 import java.io.FileInputStream;
@@ -60,6 +71,10 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.util.Collections;
+import java.util.Comparator;
 
 import jp.co.thinkethbank.kurikita.chisanpo.entity.DropboxUtils;
 import jp.co.thinkethbank.kurikita.chisanpo.entity.SerialMarkerOptions;
@@ -122,10 +137,19 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     private ArrayList<MarkerOptions> goals;
     private List<ParseObject> parseGoals;
 
+    /** 神社リスト用 */
+    private List<Refuge> mRefugeList = new ArrayList<Refuge>();
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_maps);
+
+        /**
+         *画面をスリープにしない処理を追加
+         */
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
         // ***** レイアウトの設定 *****
         ImageButton settingButton = (ImageButton)findViewById(R.id.settingButton);
         settingButton.setOnClickListener(new View.OnClickListener() {
@@ -151,6 +175,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     @Override
     protected void onResume() {
         super.onResume();
+        setUpMapIfNeeded();
         googleApiClient.connect();
 
         if(dropboxAPI.getSession().authenticationSuccessful()) {
@@ -160,6 +185,8 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
             Toast.makeText(this, "Dropboxの認証に成功しました", Toast.LENGTH_SHORT).show();
         }
     }
+
+
 
     @Override
     protected void onStart() {
@@ -356,6 +383,159 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         settings.setScrollGesturesEnabled(true);
         // ズームジェスチャー(ピンチイン・アウト)の有効化
         settings.setZoomGesturesEnabled(true);
+
+        mRefugeList.clear();
+        parseXML();
+        addMaker();
+
+        Refuge refuge = mRefugeList.get(0);
+        if (refuge != null) {
+            CameraUpdate cu = CameraUpdateFactory.newLatLngZoom(new LatLng(refuge.getLat(), refuge.getLng()), 15);
+            gMap.moveCamera(cu);
+        }
+        gMap.setOnMapClickListener(new GoogleMap.OnMapClickListener() {
+            @Override
+            public void onMapClick(LatLng latLng) {
+                calcDistance(latLng);
+                sortRefugeList();
+                updateMaker();
+                addLine(latLng);
+            }
+        });
+    }
+
+    private void addLine(LatLng point){
+
+        CircleOptions circleOptions = new CircleOptions()
+                .center(point)
+                        //.fillColor(Color.LTGRAY)
+                .radius(3);
+        gMap.addCircle(circleOptions);
+        for (Refuge refuge : mRefugeList) {
+            if (refuge != null) {
+                if (refuge.isNear()) {
+                    PolylineOptions polyOptions = new PolylineOptions();
+                    polyOptions.add(point);
+                    polyOptions.add(new LatLng(refuge.getLat(), refuge.getLng()));
+                    polyOptions.color(Color.GRAY);
+                    polyOptions.width(3);
+                    polyOptions.geodesic(true); //true:大圏コース,false:直線
+                    gMap.addPolyline(polyOptions);
+                }
+            }
+        }
+    }
+
+    private void updateMaker() {
+        int i = 0;
+        gMap.clear();
+        for (Refuge refuge : mRefugeList) {
+            if (refuge != null) {
+                MarkerOptions options = new MarkerOptions();
+                options.position(new LatLng(refuge.getLat(), refuge.getLng()));
+                options.title(refuge.getName() + " " + refuge.getDistance() + "m");
+                options.snippet(refuge.getAddress());
+                BitmapDescriptor icon;
+                if (i > 2) {
+                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_MAGENTA);
+                    refuge.setNear(false);
+                } else {
+                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED);
+                    refuge.setNear(true);
+                }
+                options.icon(icon);
+                Marker marker = gMap.addMarker(options);
+                if (i == 0) {
+                    marker.showInfoWindow();
+                }
+                i++;
+            }
+        }
+    }
+    private void sortRefugeList(){
+        Collections.sort(mRefugeList, new Comparator<Refuge>() {
+            @Override
+            public int compare(Refuge lhs, Refuge rhs) {
+                return lhs.getDistance() - rhs.getDistance();
+            }
+        });
+    }
+    private void calcDistance(LatLng point){
+        // タッチした場所と避難所の距離を求める
+        double startLat = point.latitude;
+        double startLng = point.longitude;
+        // 結果を格納するための配列
+        float[] results = new float[3];
+        for (Refuge refuge : mRefugeList) {
+            if (refuge != null) {
+                Location.distanceBetween(startLat, startLng, refuge.getLat(), refuge.getLng(), results);
+                refuge.setDistance(results[0]);
+            }
+        }
+
+
+    }
+    private void parseXML() {
+        // AssetManagerの呼び出し
+        AssetManager assetManager = getResources().getAssets();
+        try {
+
+            // XMLファイルのストリーム情報を取得
+            InputStream is = assetManager.open("refuge_nonoichi.xml");
+            InputStreamReader inputStreamReader = new InputStreamReader(is);
+            XmlPullParser parser = Xml.newPullParser();
+            parser.setInput(inputStreamReader);
+            String title="";
+            String address="";
+            String lat = "";
+            String lon = "";
+
+            int eventType = parser.getEventType();
+            while (eventType != XmlPullParser.END_DOCUMENT) {
+                switch (eventType) {
+                    case XmlPullParser.START_TAG:
+                        String tag = parser.getName();
+                        if ("marker".equals(tag)) {
+                            title = parser.getAttributeValue(null,"title");
+                            address = parser.getAttributeValue(null,"adress");
+                            lat = parser.getAttributeValue(null,"lat");
+                            lon = parser.getAttributeValue(null,"lng");
+                        }
+                        break;
+                    case XmlPullParser.END_TAG:
+                        String endTag = parser.getName();
+                        if ("marker".equals(endTag)) {
+                            newRefuge(title, address,Double.valueOf(lat), Double.valueOf(lon));
+                        }
+                        break;
+                    case XmlPullParser.TEXT:
+                        break;
+                }
+                eventType = parser.next();
+            }
+        } catch (XmlPullParserException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+    }
+    private void newRefuge(String title,String address,double lat,double lon) {
+        Refuge refuge;
+        refuge = new Refuge(title,address,lat,lon);
+        mRefugeList.add(refuge);
+
+    }
+    private void addMaker() {
+        for (Refuge refuge : mRefugeList) {
+            if (refuge != null) {
+                MarkerOptions options = new MarkerOptions();
+                options.position(new LatLng(refuge.getLat(),refuge.getLng()));
+                options.title(refuge.getName());
+                options.snippet(refuge.getAddress());
+                gMap.addMarker(options);
+            }
+        }
     }
 
     private void setupDropBox(){
