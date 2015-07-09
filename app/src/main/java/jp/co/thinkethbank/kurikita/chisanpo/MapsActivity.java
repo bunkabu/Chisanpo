@@ -435,7 +435,8 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                 options.position(new LatLng(refuge.getLat(), refuge.getLng()));
                 options.title(refuge.getName() + " " + refuge.getDistance() + "m");
                 options.snippet(refuge.getAddress());
-                BitmapDescriptor icon;
+                //アイコンを地井さんに設定する
+                BitmapDescriptor icon = BitmapDescriptorFactory.fromResource(R.mipmap.chi);
                 if (i > 2) {
                     icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_MAGENTA);
                     refuge.setNear(false);
