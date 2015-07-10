@@ -28,7 +28,6 @@ public class UploadPicture extends AsyncTask<Void, Long, Boolean> {
 
     @Override
     protected Boolean doInBackground(Void... params) {
-
         try {
             DropboxAPI.Entry response = dropboxAPI.putFile("/ChiSanphoto/" + name, inputStream, dataLength,
                     null, new DropboxUploadProgressListener());

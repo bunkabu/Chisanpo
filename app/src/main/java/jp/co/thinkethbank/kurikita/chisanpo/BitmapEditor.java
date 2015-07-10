@@ -7,7 +7,7 @@ import java.io.ByteArrayOutputStream;
 
 /** ビットマップに対する加工を行う */
 public class BitmapEditor {
-    private static final float THUMB_SIZE = 64f;
+    private static final float THUMB_SIZE = 128f;
     /**
      * Bitmapをリサイズする
      * @param src スケーリングするBitmap

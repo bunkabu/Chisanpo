@@ -45,6 +45,7 @@ import com.google.android.gms.maps.model.CameraPosition;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.MarkerOptions;
 import com.google.android.gms.maps.model.Marker;
+import com.google.android.gms.maps.model.Polyline;
 import com.google.android.gms.maps.model.PolylineOptions;
 import com.google.android.gms.maps.model.CircleOptions;
 import com.google.android.gms.maps.CameraUpdate;
@@ -71,11 +72,9 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Calendar;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
-import java.util.TimeZone;
 
 import jp.co.thinkethbank.kurikita.chisanpo.entity.DropboxUtils;
 import jp.co.thinkethbank.kurikita.chisanpo.entity.SerialMarkerOptions;
@@ -118,16 +117,18 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     private DropboxAPI<AndroidAuthSession> dropboxAPI;
     private DropboxUtils dropboxUtils;
 
+    /** googleMap API */
     private GoogleMap gMap; // Might be null if Google Play services APK is not available.
     private GoogleApiClient googleApiClient = null;
     private TextView infoText;
 
     /** parse用。memberIdとpositionとmillisecUpdateしか持ってないよ */
     private ParseObject geoPosition;
-    private Calendar cal = Calendar.getInstance(TimeZone.getTimeZone("Europe/London"));
 
     /** 立てたマーカーをリスト化して保持する */
     private ArrayList<SerialMarkerOptions> markerList;
+    /** 足跡情報を保持する */
+    private Polyline groupFootprints;
     /** 現在位置を取得する頻度の設定 */
     private static final LocationRequest REQUEST = LocationRequest.create()
             .setInterval(20000) // 20 seconds
@@ -144,10 +145,14 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
     private ArrayList<MarkerOptions> goals;
     private List<ParseObject> parseGoals;
-    private MarkerOptions[] groupIcons = new MarkerOptions[MAX_GROUP_NUM];
+    private Marker[] groupIcons = new Marker[MAX_GROUP_NUM];
+    private MarkerOptions[] groupIconOptions = new MarkerOptions[MAX_GROUP_NUM];
 
     /** 神社リスト用 */
     private List<Refuge> mRefugeList = new ArrayList<Refuge>();
+
+    /** サムネのマーカーリスト */
+    private ArrayList<Marker> thumbMarkerList = new ArrayList<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -243,7 +248,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                     AlertDialog.Builder listDialog = new AlertDialog.Builder(this);
                     listDialog
                             .setTitle("管理者メニュー")
-                            .setItems(new String[]{"ゴールの設定(工事中)", "アカウント削除して終了", "ズーム13.7", "ズーム20"}, new DialogInterface.OnClickListener() {
+                            .setItems(new String[]{"ゴールの設定(工事中)", "アカウント削除して終了", "ズーム13.7", "足跡"}, new DialogInterface.OnClickListener() {
                                 @Override
                                 public void onClick(DialogInterface dialog, int which) {
                                     switch(which){
@@ -274,7 +279,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                                             gMap.moveCamera(CameraUpdateFactory.zoomTo(13.7f));
                                             break;
                                         case 3:
-                                            gMap.moveCamera(CameraUpdateFactory.zoomTo(20));
+                                            dispGroupFootprints(4);
                                             break;
                                     }
                                 }
@@ -313,7 +318,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 //            overlay.setTransparency(0.3F);
             MarkerOptions thumbMark = new MarkerOptions()
                     .title(fileName)
-                    .position(new LatLng(oldLatitude, oldLongitude))
+                    .position(keepGoal)
                     .icon(BitmapDescriptorFactory.fromBitmap(thumb))
                     .snippet(comment);
             gMap.addMarker(thumbMark);
@@ -372,7 +377,8 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
 
     private void setup(){
         setGeoPosition();
-        putGoal();
+        setThumbnail();
+        // putGoal();
     }
 
     private void setupAdmin(){
@@ -603,7 +609,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         dropboxUtils = new DropboxUtils(this);
 
         if(!dropboxUtils.hasLoadAndroidAuthSession()){
-            AndroidAuthSession session = new AndroidAuthSession(new AppKeyPair("flu2b0urtc18egm", "kroennf800x63fa"));
+            AndroidAuthSession session = new AndroidAuthSession(new AppKeyPair(DropboxUtils.APP_KEY, DropboxUtils.APP_KEY_SECRET));
             dropboxAPI = new DropboxAPI<>(session);
             dropboxAPI.getSession().startOAuth2Authentication(this);
         }else{
@@ -676,10 +682,10 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                         ParseObject member = memberList.get(0);
                         user = (String) member.get("memberId");
 
-                        if(member.get("rank") == null){
+                        if (member.get("rank") == null) {
                             member.unpinInBackground();
                             finish();
-                        }else {
+                        } else {
                             // 権限者だった場合
                             if ((int) member.get("rank") == 9) {
                                 setupAdmin();
@@ -721,18 +727,65 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                         int groupId = (int) po.get("groupId");
                         ParseGeoPoint groupGeo = (ParseGeoPoint) po.get("groupGeo");
 
-                        if(groupId >= MAX_GROUP_NUM) continue;
-                        groupIcons[groupId] = new MarkerOptions()
+                        if (groupId >= MAX_GROUP_NUM) continue;
+
+                        groupIconOptions[groupId] = new MarkerOptions()
                                 .icon(BitmapDescriptorFactory.fromResource(groupIconResources[groupId]))
                                 .position(new LatLng(groupGeo.getLatitude(), groupGeo.getLongitude()))
                                 .title((String) po.get("name"));
-                        gMap.addMarker(groupIcons[groupId]);
+                        groupIcons[groupId] = gMap.addMarker(groupIconOptions[groupId]);
                     }
                 } else {
                     Toast.makeText(MapsActivity.this, "Parseからグループの位置情報データの取得に失敗しました", Toast.LENGTH_LONG).show();
                 }
             }
         });
+    }
+
+    private void setThumbnail(){
+        if(dropboxAPI != null){
+            // サムネイルファイルの取得
+            ParseQuery<ParseObject> query = ParseQuery.getQuery("ImageFile");
+            query.findInBackground(new FindCallback<ParseObject>() {
+                @Override
+                public void done(List<ParseObject> list, ParseException e) {
+                    for(ParseObject imageFile : list){
+                        String fileName = (String)imageFile.get("fileName");
+                        ParseGeoPoint pos = (ParseGeoPoint)imageFile.get("position");
+                        if(fileName != null){
+                            fileName = fileName + ".thm";
+                            File file = new File(cacheDir, fileName);
+                            // ローカルに既にあった場合
+                            if(file.exists()){
+                                MarkerOptions thumbOptions = new MarkerOptions()
+                                        .title(fileName)
+                                        .position(new LatLng(pos.getLatitude(), pos.getLongitude()))
+                                        .snippet((String) imageFile.get("comment"))
+                                        .icon(BitmapDescriptorFactory.fromPath(file.getAbsolutePath()));
+                                thumbMarkerList.add(gMap.addMarker(thumbOptions));
+                            }else{
+                                // Dropboxから取得する
+                                DownloadPicture dl = new DownloadPicture(MapsActivity.this, "thumb", dropboxAPI,
+                                        file.getAbsolutePath(), fileName);
+                                dl.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, imageFile.get("comment"),
+                                        pos.getLatitude(), pos.getLongitude());
+                            }
+                        }
+                    }
+                }
+            });
+        }else{
+            Toast.makeText(MapsActivity.this, "Dropboxの設定がされていないためサムネイルの取得に失敗しました", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    void setThumbMarkerList(String name, String value, double lat, double lng){
+            File file = new File(cacheDir, name);
+        MarkerOptions thumbOptions = new MarkerOptions()
+                .title(name)
+                .snippet(value)
+                .icon(BitmapDescriptorFactory.fromPath(file.getAbsolutePath()));
+        thumbMarkerList.add(gMap.addMarker(thumbOptions));
     }
 
     // TODO 仕様が大幅に変更なる
@@ -782,6 +835,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         flagCount = markerList.size() + 1;
     }
 
+    /** サーバーからアイテム情報を取得して書マップ乗に表示する */
     private void putGoal(){
         ParseQuery<ParseObject> query = ParseQuery.getQuery("Treasure");
         query.findInBackground(new FindCallback<ParseObject>() {
@@ -888,6 +942,35 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
     }
 
     /**
+     * 指定したグループの足跡を表示する
+     * @param groupId 表示するグループのID
+     */
+    private void dispGroupFootprints(int groupId){
+        ParseQuery<ParseObject> query = ParseQuery.getQuery("Footprints");
+        query.whereEqualTo("groupId", groupId);
+        query.findInBackground(new FindCallback<ParseObject>() {
+            @Override
+            public void done(List<ParseObject> list, ParseException e) {
+                if(e == null && list != null){
+                    if(groupFootprints != null){
+                        groupFootprints.remove();
+                    }
+
+                    PolylineOptions lines = new PolylineOptions().color(0xFF00FFFF);
+                    for(ParseObject footPrint : list){
+                        ParseGeoPoint p = (ParseGeoPoint)footPrint.get("position");
+                        lines.add(new LatLng(p.getLatitude(), p.getLongitude()));
+                    }
+
+                    groupFootprints = gMap.addPolyline(lines);
+                }else{
+                    Toast.makeText(MapsActivity.this, "グループID：" + user + "の足跡の取得に失敗しました", Toast.LENGTH_LONG).show();
+                }
+            }
+        });
+    }
+
+    /**
      * 自分の位置をサーバーに送ると同時にサーバーからグループの位置を取得する
      * @param latitude 緯度
      * @param longitude 経度
@@ -899,7 +982,6 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
             pos.setLongitude(longitude);
 
             // 標準時の時間
-            geoPosition.put("millisecUpdate", cal.getTimeInMillis());
             geoPosition.saveInBackground(new SaveCallback() {
                 @Override
                 public void done(ParseException e) {
@@ -921,10 +1003,12 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                         ParseGeoPoint groupGeo = (ParseGeoPoint)po.get("groupGeo");
 
                         if(groupIcons[groupId] != null) {
-                            groupIcons[groupId].position(new LatLng(groupGeo.getLatitude(), groupGeo.getLongitude()));
+                            groupIcons[groupId].remove();
+                            groupIconOptions[groupId].position(new LatLng(groupGeo.getLatitude(), groupGeo.getLongitude()));
                         }else{
-                            groupIcons[groupId] = new MarkerOptions().position(new LatLng(groupGeo.getLatitude(), groupGeo.getLongitude()));
+                            groupIconOptions[groupId] = new MarkerOptions().position(new LatLng(groupGeo.getLatitude(), groupGeo.getLongitude()));
                         }
+                        groupIcons[groupId] = gMap.addMarker(groupIconOptions[groupId]);
                     }
                 }else{
                     Toast.makeText(MapsActivity.this, "Parseからグループの位置情報データの取得に失敗しました", Toast.LENGTH_LONG).show();
@@ -982,34 +1066,36 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         double diffLongitude = (longitude - oldLongitude) / 0.000010966382364;
         double length_2 = diffLatitude * diffLatitude + diffLongitude * diffLongitude;
 
+        // ***** カメラとかの設定 *****
         // あまり動いていない場合は処理を実行しない
         if(length_2 < 100){
             return;
         }else if(length_2 > 90000){
             length_2 = 90000;
         }
-
         float zoomCoefficient = 12f + (float)(60 / (Math.pow(length_2, 0.3) + 4d));
         CameraPosition currentPlace = new CameraPosition.Builder()
                 .target(new LatLng(latitude, longitude)).zoom(zoomCoefficient)
                 .bearing(location.getBearing()).build();
         gMap.animateCamera(CameraUpdateFactory.newCameraPosition(currentPlace));
+
+        // ***** 雑多な処理 *****
         // マーカーの作成
         putMarker(latitude, longitude);
-
         // サーバーに位置情報の送信
         syncPosition(latitude, longitude);
 
         // ***** 目的地到着判定 *****
-        if(goals != null){
-            for(int i = 0; i < goals.size(); i++){
-                MarkerOptions goal = goals.get(i);
+        if(mRefugeList != null){
+            for(int i = 0; i < mRefugeList.size(); i++){
+                Refuge goal = mRefugeList.get(i);
 
-                double diffGoalLatitude = (goal.getPosition().latitude - latitude) / 0.000008983148616;
-                double diffGoalLongitude = (goal.getPosition().longitude - longitude) / 0.000010966382364;
+                double diffGoalLatitude = (goal.getLat() - latitude) / 0.000008983148616;
+                double diffGoalLongitude = (goal.getLng() - longitude) / 0.000010966382364;
 
                 if (diffGoalLatitude * diffGoalLatitude + diffGoalLongitude * diffGoalLongitude < VALUE_GOAL_RANGE) {
-                    reachPoint((int)parseGoals.get(i).get("treasureId"), goal.getPosition());
+                    reachPoint((int)parseGoals.get(i).get("treasureId"), new LatLng(goal.getLat(), goal.getLng()));
+                    break;
                 }
             }
         }
