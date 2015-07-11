@@ -17,6 +17,7 @@ public class DownloadPicture extends AsyncTask<Object, Long, Boolean> {
     private DropboxAPI<AndroidAuthSession> dropboxAPI;
     private String type;
     private String outputFileName;
+    /** 拡張子無し */
     private String downloadFileName;
     private Object[] params;
 
@@ -32,11 +33,23 @@ public class DownloadPicture extends AsyncTask<Object, Long, Boolean> {
     @Override
     protected Boolean doInBackground(Object... params) {
         this.params = params;
+        String fullFileName;
+        switch(type){
+            case "thumb":
+                fullFileName = downloadFileName + ".thm";
+                break;
+            case "viewer":
+                fullFileName = downloadFileName + ".jpg";
+                break;
+            default:
+                fullFileName = downloadFileName;
+        }
+
         File file = new File(outputFileName);
-        FileOutputStream outputStream = null;
+        FileOutputStream outputStream;
         try {
             outputStream = new FileOutputStream(file);
-            dropboxAPI.getFile("/ChiSanphoto/" + downloadFileName, null, outputStream, null);
+            dropboxAPI.getFile("/ChiSanphoto/" + fullFileName, null, outputStream, null);
         } catch (FileNotFoundException | DropboxException e) {
             e.printStackTrace();
             return false;
@@ -50,6 +63,9 @@ public class DownloadPicture extends AsyncTask<Object, Long, Boolean> {
             switch (type) {
                 case "thumb":
                     mapsActivity.setThumbMarkerList(downloadFileName, (String)params[0], (double)params[1], (double)params[2]);
+                    break;
+                case "viewer":
+                    mapsActivity.makeImageViewDialog(outputFileName, (String)params[0], null);
                     break;
             }
         }

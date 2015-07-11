@@ -1,6 +1,7 @@
 package jp.co.thinkethbank.kurikita.chisanpo;
 
 import android.content.res.AssetManager;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.util.Xml;
 import android.app.Activity;
@@ -15,6 +16,7 @@ import android.os.Bundle;
 import android.support.v7.app.AlertDialog;
 import android.text.InputType;
 import android.util.Log;
+import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
@@ -23,6 +25,7 @@ import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -467,6 +470,35 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                 addLine(latLng);
             }
         });
+
+        gMap.setOnMarkerClickListener(new GoogleMap.OnMarkerClickListener() {
+            @Override
+            public boolean onMarkerClick(Marker marker) {
+                // サムネイルのマーカーだった場合
+                if(thumbMarkerList != null){
+                    for(Marker thumbMarker : thumbMarkerList){
+                        if(thumbMarker.getId().equals(marker.getId())){
+                            String fileName = marker.getTitle();
+                            if(fileName != null){
+                                File file = new File(cacheDir, fileName + ".jpg");
+                                // ローカルに既にあった場合
+                                if(file.exists()){
+                                    makeImageViewDialog(file.getAbsolutePath(), marker.getSnippet(), null);
+                                }else{
+                                    // Dropboxから取得する
+                                    DownloadPicture dl = new DownloadPicture(MapsActivity.this, "viewer", dropboxAPI,
+                                            file.getAbsolutePath(), fileName);
+                                    dl.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, marker.getSnippet());
+                                }
+                            }
+                        }
+                    }
+                    return false;
+                }else {
+                    return false;
+                }
+            }
+        });
     }
 
     private void addLine(LatLng point){
@@ -527,6 +559,7 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
             }
         });
     }
+
     private void calcDistance(LatLng point){
         // タッチした場所と避難所の距離を求める
         double startLat = point.latitude;
@@ -539,9 +572,8 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
                 refuge.setDistance(results[0]);
             }
         }
-
-
     }
+
     private void parseXML() {
         // AssetManagerの呼び出し
         AssetManager assetManager = getResources().getAssets();
@@ -749,21 +781,20 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
             query.findInBackground(new FindCallback<ParseObject>() {
                 @Override
                 public void done(List<ParseObject> list, ParseException e) {
-                    for(ParseObject imageFile : list){
-                        String fileName = (String)imageFile.get("fileName");
-                        ParseGeoPoint pos = (ParseGeoPoint)imageFile.get("position");
-                        if(fileName != null){
-                            fileName = fileName + ".thm";
-                            File file = new File(cacheDir, fileName);
+                    for (ParseObject imageFile : list) {
+                        String fileName = (String) imageFile.get("fileName");
+                        ParseGeoPoint pos = (ParseGeoPoint) imageFile.get("position");
+                        if (fileName != null) {
+                            File file = new File(cacheDir, fileName + ".thm");
                             // ローカルに既にあった場合
-                            if(file.exists()){
+                            if (file.exists()) {
                                 MarkerOptions thumbOptions = new MarkerOptions()
                                         .title(fileName)
                                         .position(new LatLng(pos.getLatitude(), pos.getLongitude()))
                                         .snippet((String) imageFile.get("comment"))
                                         .icon(BitmapDescriptorFactory.fromPath(file.getAbsolutePath()));
                                 thumbMarkerList.add(gMap.addMarker(thumbOptions));
-                            }else{
+                            } else {
                                 // Dropboxから取得する
                                 DownloadPicture dl = new DownloadPicture(MapsActivity.this, "thumb", dropboxAPI,
                                         file.getAbsolutePath(), fileName);
@@ -779,13 +810,51 @@ public class MapsActivity extends FragmentActivity implements GoogleApiClient.On
         }
     }
 
+    /**
+     * 他のクラスから呼び出す用。非同期にサムネイルマーカーを呼び出す
+     * @param name ファイル名。拡張子無し
+     * @param value コメントとか
+     * @param lat 緯度
+     * @param lng 経度
+     */
     void setThumbMarkerList(String name, String value, double lat, double lng){
-            File file = new File(cacheDir, name);
+            File file = new File(cacheDir, name + ".thm");
         MarkerOptions thumbOptions = new MarkerOptions()
                 .title(name)
+                .position(new LatLng(lat, lng))
                 .snippet(value)
                 .icon(BitmapDescriptorFactory.fromPath(file.getAbsolutePath()));
         thumbMarkerList.add(gMap.addMarker(thumbOptions));
+    }
+
+    /**
+     * 画像を表示するダイアログの作成
+     * @param fileName 画像のファイル名
+     * @param comment 表示するコメント
+     * @param list 他の人のコメント（未実装）
+     */
+    void makeImageViewDialog(String fileName, String comment, List<ParseObject> list){
+        Bitmap bitmap = BitmapFactory.decodeFile(fileName);
+
+        LayoutInflater inflater = (LayoutInflater)this.getSystemService(LAYOUT_INFLATER_SERVICE);
+        final View layout = inflater.inflate(R.layout.image_view_dialog,
+                (ViewGroup)findViewById(R.id.layout_root));
+
+        ImageView image = (ImageView)layout.findViewById(R.id.imageView);
+        image.setImageBitmap(bitmap);
+
+        // アラーとダイアログ を生成
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle(comment);
+        builder.setView(layout);
+        builder.setPositiveButton("閉じる", new DialogInterface.OnClickListener() {
+            public void onClick(DialogInterface dialog, int which) {
+
+            }
+        });
+
+        // 表示
+        builder.create().show();
     }
 
     // TODO 仕様が大幅に変更なる
