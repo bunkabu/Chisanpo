@@ -1,4 +1,4 @@
-package jp.co.thinkethbank.kurikita.chisanpo.entity;
+package jp.co.thinkethbank.kurikita.chisanpo;
 
 import android.content.Context;
 import android.content.SharedPreferences;

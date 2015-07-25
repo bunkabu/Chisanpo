@@ -1,9 +1,12 @@
 package jp.co.thinkethbank.kurikita.chisanpo;
 
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
 
 import java.io.ByteArrayOutputStream;
+import java.io.FileInputStream;
+import java.io.IOException;
 
 /** ビットマップに対する加工を行う */
 public class BitmapEditor {
@@ -61,6 +64,23 @@ public class BitmapEditor {
         if(bitmap.compress(Bitmap.CompressFormat.JPEG, quality, outputStream)){
             return outputStream.toByteArray();
         }else{
+            return null;
+        }
+    }
+
+    static Bitmap decodeThumbnail(String absolutePath){
+        try {
+            FileInputStream inputStream = new FileInputStream(absolutePath);
+            int read;
+
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            while((read = inputStream.read()) != -1){
+                bos.write(read);
+            }
+            byte[] ba = bos.toByteArray();
+            return BitmapFactory.decodeByteArray(ba, 0, ba.length);
+        } catch (IOException e) {
+            e.printStackTrace();
             return null;
         }
     }

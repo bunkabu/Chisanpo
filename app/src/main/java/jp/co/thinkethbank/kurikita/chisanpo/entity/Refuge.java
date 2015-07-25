@@ -1,4 +1,4 @@
-package jp.co.thinkethbank.kurikita.chisanpo;
+package jp.co.thinkethbank.kurikita.chisanpo.entity;
 
 /**
  * Created by kitagishikoutarou on 15/07/09.
